@@ -88,12 +88,18 @@ function calc(r,wage){
   const net=total-brk, reg=Math.min(net,480), ot=Math.max(net-480,0);
   return {total,brk,net,reg,ot,pay:wage*reg/60+wage*1.5*ot/60};
 }
-function getPos(){return new Promise((res,rej)=>{
-  if(!navigator.geolocation)return rej(new Error('이 기기는 위치 기능을 지원하지 않습니다.'));
-  navigator.geolocation.getCurrentPosition(p=>res(p.coords),
-    e=>rej(new Error(e.code==1?'위치 권한을 허용해 주세요.':'위치를 가져오지 못했습니다.')),
-    {enableHighAccuracy:true,timeout:15000,maximumAge:0});
-})}
+// 정밀 위치(GPS)를 먼저 시도하고, 실패하면 Wi-Fi/기지국 기반 위치로 한 번 더 시도
+function getPos(){
+  const once=opt=>new Promise((res,rej)=>navigator.geolocation.getCurrentPosition(p=>res(p.coords),rej,opt));
+  const msg=e=>e.code==1?'위치 권한이 꺼져 있습니다. 브라우저 주소창 옆 자물쇠 → 사이트 설정에서 위치를 "허용"으로 바꿔 주세요.'
+    :e.code==3?'위치 확인이 너무 오래 걸립니다. 창가나 실외로 이동해서 다시 눌러 주세요.'
+    :'위치를 가져오지 못했습니다. 폰의 위치(GPS) 기능이 켜져 있는지 확인해 주세요.';
+  if(!navigator.geolocation)return Promise.reject(new Error('이 기기는 위치 기능을 지원하지 않습니다.'));
+  return once({enableHighAccuracy:true,timeout:12000,maximumAge:0}).catch(e=>{
+    if(e.code==1)throw new Error(msg(e));
+    return once({enableHighAccuracy:false,timeout:20000,maximumAge:60000}).catch(e2=>{throw new Error(msg(e2))});
+  });
+}
 
 /* ---------- 화면 ---------- */
 function render(){
