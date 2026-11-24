@@ -160,6 +160,7 @@ function workerView(){
   const seg=curSeg(open);
   const taskPanel=open?`<div class="card"><h2>지금 작업</h2>
     <div class="cur ${seg&&seg.task==='break'?'brk':''}">${seg?`${esc(seg.name)} · <span id="seg" data-start="${seg.start}">00:00:00</span>`:'<span class="sub">작업을 선택하면 시간이 측정됩니다</span>'}</div>
+    ${seg&&seg.task==='break'&&seg.resume?`<button style="width:100%;height:60px;font-size:17px;margin-bottom:10px;background:var(--bl)" data-act="resume">▶ ${esc(seg.resume.name)}${seg.resume.item?' · '+esc(seg.resume.item.name):''} 이어서 하기</button>`:''}
     ${seg&&seg.item?`<div class="itemrow"><div style="margin-bottom:6px"><b>${esc(seg.item.name)}</b></div>
       <div class="row"><input id="qty" inputmode="numeric" placeholder="몇 개 했나요?" value="${seg.qty??''}"><button data-act="saveqty" style="flex:0 0 80px;margin-bottom:8px">저장</button></div></div>`:''}
     <div class="grid">${S.tasks.map(t=>`<button class="tk ${seg&&seg.task===t.id?'on':''}" data-act="task" data-id="${t.id}">${esc(t.name)}</button>`).join('')}
@@ -196,7 +197,7 @@ function adminView(){
     const rs=S.records.filter(r=>r.date===t).sort((a,b)=>a.in-b.in);
     const rows=rs.map(r=>{const w=wm[r.wid];
       return `<tr><td>${esc(w?w.name:'?')}${r.manual?' <span class="sub">(수동)</span>':''}</td><td>${hm(r.in)}</td><td>${r.out?hm(r.out):'<span class="tag">근무중</span>'}</td>
-      <td>${r.out?'':(curSeg(r)?esc(curSeg(r).name)+(curSeg(r).item?' / '+esc(curSeg(r).item.name)+(curSeg(r).qty!=null?' ('+curSeg(r).qty+'개)':''):''):'<span class="sub">-</span>')}</td>
+      <td>${r.out?'':(curSeg(r)?esc(curSeg(r).name)+(curSeg(r).item?' / '+esc(curSeg(r).item.name)+(curSeg(r).qty!=null?' ('+curSeg(r).qty+'개)':''):(curSeg(r).resume?' <span class="sub">('+esc(curSeg(r).resume.name)+' 중 잠시)</span>':'')):'<span class="sub">-</span>')}</td>
       <td><button class="sm ghost" data-act="delrec" data-id="${r.id}">삭제</button></td></tr>`}).join('');
     const opts=S.workers.map(w=>`<option value="${w.id}">${esc(w.name)}</option>`).join('');
     body=`<div class="card"><h2>오늘 (${t}) 출퇴근 · ${rs.filter(r=>!r.out).length}명 근무중</h2>
@@ -295,17 +296,42 @@ function openSubSheet(t){
   sheetEl().innerHTML=`<div class="shbg" data-act="closesheet"></div><div class="sh"><div class="shh"><b>${esc(t.name)}</b><button class="ghost sm" data-act="closesheet">닫기</button></div>
     ${(t.subs||[]).map(x=>`<button class="subbtn" data-act="startsub" data-id="${t.id}" data-sub="${esc(x)}">${esc(x)}</button>`).join('')}</div>`;
 }
-// 다른 작업으로 넘어가거나 퇴근하기 전에 수량 확인: 입력만 하고 저장 안 눌렀으면 자동 저장
-async function confirmQty(){
-  const cur=curSeg(S.records.find(r=>!r.out));
-  if(!cur||!cur.item)return true;
-  const el=$('#qty'),v=el?el.value.trim():'';
-  if(v!==''){if(String(cur.qty??'')!==v)await api('POST','/api/task/qty',{qty:v});return true}
-  if(cur.qty==null)return confirm('수량(몇 개 했는지)을 아직 입력하지 않았어요. 그래도 넘어갈까요?');
-  return true;
+// 수량을 물어봐야 하는 품목 작업: 지금 하는 품목 작업, 또는 휴게 중이면 쉬기 직전에 하던 품목 작업
+function pendingSeg(r){
+  const segs=(r&&r.segments)||[],cur=segs.find(s=>!s.end);
+  if(!cur)return null;
+  if(cur.item)return cur;
+  if(cur.task==='break'&&cur.resume&&cur.resume.item){const p=segs[segs.indexOf(cur)-1];return p&&p.item?p:null}
+  return null;
 }
-async function startTask(body){
-  try{if(!(await confirmQty()))return;await api('POST','/api/task',body);closeSheet();await refresh()}
+// 수량 입력 창: {qty} 저장 / {skip:true} 수량 없이 계속 / null 취소
+function askQty(seg,prior){
+  return new Promise(res=>{
+    askQty._res=res;
+    sheetEl().innerHTML=`<div class="shbg" data-act="qcancel"></div><div class="sh">
+      <div class="shh"><b>수량 입력</b></div>
+      <div style="margin-bottom:10px"><b>${esc(seg.item.name)}</b><div class="sub">${esc(seg.name)} 작업을 마칩니다. 몇 개 하셨나요?${prior?`<br>이 작업에서 앞서 입력한 ${prior}개는 합쳐집니다. 이어서 한 수량만 적으세요.`:''}</div></div>
+      <input id="qq" inputmode="numeric" placeholder="수량" autocomplete="off">
+      <button style="width:100%;margin-bottom:8px" data-act="qok">저장하고 계속</button>
+      <div class="row"><button class="ghost" data-act="qskip">수량 없이 계속</button><button class="ghost" data-act="qcancel">취소</button></div></div>`;
+    setTimeout(()=>{const q=$('#qq');if(q)q.focus()},50);
+  });
+}
+// 품목 작업을 끝내고 다른 작업으로 가거나 퇴근할 때만 수량을 묻는다. soft=true(휴게·이어하기)면 묻지 않음
+async function confirmQty(soft){
+  const open=S.records.find(r=>!r.out),pend=pendingSeg(open);
+  if(!pend)return true;
+  const el=$('#qty'),v=(el&&pend===curSeg(open))?el.value.trim():'';
+  if(v!==''){if(String(pend.qty??'')!==v)await api('POST','/api/task/qty',{qty:v});return true}   // 입력만 하고 저장 안 눌렀으면 자동 저장
+  if(soft||pend.qty!=null)return true;
+  const prior=open.segments.filter(s=>s!==pend&&s.item&&s.item.id===pend.item.id&&s.task===pend.task).reduce((a,s)=>a+(s.qty||0),0);
+  const r=await askQty(pend,prior);
+  if(!r)return false;
+  if(r.skip)return true;
+  await api('POST','/api/task/qty',{qty:r.qty});return true;
+}
+async function startTask(body,soft){
+  try{if(!(await confirmQty(soft)))return;await api('POST','/api/task',body);closeSheet();await refresh()}
   catch(er){alert(er.message);refresh().catch(()=>{})}
 }
 function logout(){token=null;S=null;ITEMS=null;closeSheet();try{localStorage.removeItem(TKEY)}catch(e){}ui.msg='';ui.err=false;render()}
@@ -368,8 +394,16 @@ document.addEventListener('click',async e=>{
     const t=S.tasks.find(x=>x.id===id);
     if(t&&t.kind==='item')openItemSheet(t);
     else if(t&&t.kind==='sub')openSubSheet(t);
-    else startTask({taskId:id});
+    else startTask({taskId:id},id==='break');   // 휴게는 수량을 묻지 않음
   }
+  else if(act==='resume')startTask({taskId:'resume'},true);
+  else if(act==='qok'){
+    const v=$('#qq').value.trim();
+    if(!/^\d+$/.test(v))return alert('수량을 숫자로 입력해 주세요.');
+    closeSheet();askQty._res({qty:v});
+  }
+  else if(act==='qskip'){closeSheet();askQty._res({skip:true})}
+  else if(act==='qcancel'){closeSheet();askQty._res(null)}
   else if(act==='closesheet')closeSheet();
   else if(act==='selitem'){
     document.querySelectorAll('.it.on').forEach(x=>x.classList.remove('on'));b.classList.add('on');

@@ -123,9 +123,19 @@ async function api(req, url, body, ip) {
     open.segments = open.segments || [];
     const cur = open.segments.find(x => !x.end), now = Date.now();
     if (body.taskId === 'stop') { if (!cur) throw E(409, '진행 중인 작업이 없습니다.'); closeSeg(open, now); await save(); return { at: now }; }
+    if (body.taskId === 'resume') { // 휴게 끝내고, 쉬기 전에 하던 작업(품목 포함)을 그대로 이어서 시작
+      if (!cur || cur.task !== 'break' || !cur.resume) throw E(409, '이어서 할 작업이 없습니다.');
+      const r = cur.resume, seg = { task: r.task, name: r.name, start: now, end: null };
+      if (r.item) { seg.item = r.item; seg.qty = null; }
+      if (r.sub) seg.sub = r.sub;
+      closeSeg(open, now); open.segments.push(seg); await save(); return { at: now };
+    }
     const t = body.taskId === 'break' ? BREAK : db.settings.tasks.find(x => x.id === body.taskId);
     if (!t) throw E(404, '작업을 찾을 수 없습니다.');
     const seg = { task: t.id, name: t.name, start: now, end: null };
+    if (t.id === 'break' && cur && cur.task !== 'break') { // 쉬기 전에 하던 작업을 기억해 둠
+      seg.resume = { task: cur.task, name: cur.name, ...(cur.item ? { item: cur.item } : {}), ...(cur.sub ? { sub: cur.sub } : {}) };
+    }
     if (t.kind === 'item') {
       const it = db.items.find(x => x.id === body.itemId); if (!it) throw E(400, '품목을 선택해 주세요.');
       seg.item = { id: it.id, name: it.name }; seg.qty = null;
@@ -140,10 +150,12 @@ async function api(req, url, body, ip) {
   if (route === 'POST /api/task/qty') { // 진행 중인 품목 작업의 수량 저장
     if (auth.role !== 'worker') throw E(403, '직원 계정만 사용할 수 있습니다.');
     const open = db.records.find(r => r.wid === auth.wid && !r.out);
-    const cur = open && (open.segments || []).find(x => !x.end);
-    if (!cur || !cur.item) throw E(409, '품목 작업 중에만 수량을 입력할 수 있습니다.');
+    const segs = (open && open.segments) || [], cur = segs.find(x => !x.end);
+    let target = cur && cur.item ? cur : null;
+    if (!target && cur && cur.task === 'break' && cur.resume && cur.resume.item) { const p = segs[segs.indexOf(cur) - 1]; if (p && p.item) target = p; } // 휴게 중이면 쉬기 전 품목 작업에 저장
+    if (!target) throw E(409, '품목 작업 중에만 수량을 입력할 수 있습니다.');
     const q = Number(body.qty); if (!Number.isInteger(q) || q < 0 || q > 1e6) throw E(400, '수량은 0 이상의 정수로 입력해 주세요.');
-    cur.qty = q; await save(); return {};
+    target.qty = q; await save(); return {};
   }
   if (route === 'GET /api/items') return { items: db.items };
 
