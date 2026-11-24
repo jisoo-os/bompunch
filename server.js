@@ -41,7 +41,11 @@ async function loadDb() {
     const r = await pool.query("select v from kv where k='db'"); d = r.rows[0] && r.rows[0].v;
   } else if (fs.existsSync(DATA_FILE)) d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   db = d || { settings: { name: '봄찬', lat: null, lng: null, radius: 150, minWage: 10320, adminPin: hashPin(process.env.ADMIN_PIN || '0000') }, workers: [], records: [] };
-  if (!db.settings.tasks) { db.settings.tasks = DEFAULT_TASKS.map(newTask); save(); } // 기존 데이터에도 기본 작업 목록 추가
+  let changed = false;
+  if (!db.items) { db.items = []; changed = true; }
+  if (!db.settings.tasks) { db.settings.tasks = DEFAULT_TASKS.map(n => Object.assign(newTask(n), TASK_META[n] || {})); changed = true; } // 기존 데이터에도 기본 작업 목록 추가
+  db.settings.tasks.forEach(t => { if (!('kind' in t)) { Object.assign(t, { kind: '' }, TASK_META[t.name] || {}); changed = true; } }); // 이전 버전 작업에 종류 부여
+  if (changed) save();
 }
 let chain = Promise.resolve();
 function save() {
@@ -64,12 +68,14 @@ const pubWorker = w => ({ id: w.id, name: w.name, wage: w.wage });
 const validPin = p => /^\d{4,8}$/.test(String(p));
 const DEFAULT_TASKS = ['롯데출고', '대신출고', '선작업', '용차/밀크런 출고', '밀크런', '밀크런 이슈', '쉽먼트', '용차 준비', '입고', '운영관리', '현장정비'];
 const BREAK = { id: 'break', name: '휴게' };
-const newTask = name => ({ id: 't' + crypto.randomBytes(5).toString('hex'), name });
+// kind: 'item' = 품목 선택 + 수량 입력, 'sub' = 세부 작업 선택, '' = 일반
+const newTask = (name, kind, subs) => ({ id: 't' + crypto.randomBytes(5).toString('hex'), name, kind: kind || '', ...(subs && subs.length ? { subs } : {}) });
+const TASK_META = { '선작업': { kind: 'item' }, '밀크런': { kind: 'item' }, '쉽먼트': { kind: 'item' }, '운영관리': { kind: 'sub', subs: ['회의', '사무업무', '쿠팡서류'] } };
 const closeSeg = (r, t) => { const s = (r.segments || []).find(x => !x.end); if (s) s.end = t; };
 
 function state(auth) {
   const s = db.settings;
-  if (auth.role === 'admin') return { role: 'admin', settings: { name: s.name, radius: s.radius, minWage: s.minWage, hasLoc: s.lat != null }, tasks: s.tasks, workers: db.workers.map(pubWorker), records: db.records };
+  if (auth.role === 'admin') return { role: 'admin', settings: { name: s.name, radius: s.radius, minWage: s.minWage, hasLoc: s.lat != null }, tasks: s.tasks, itemCount: db.items.length, workers: db.workers.map(pubWorker), records: db.records };
   const me = db.workers.find(w => w.id === auth.wid); if (!me) throw E(401, '계정을 찾을 수 없습니다.');
   return { role: 'worker', settings: { name: s.name, radius: s.radius, hasLoc: s.lat != null }, tasks: s.tasks, me: pubWorker(me), records: db.records.filter(r => r.wid === me.id) };
 }
@@ -119,10 +125,27 @@ async function api(req, url, body, ip) {
     if (body.taskId === 'stop') { if (!cur) throw E(409, '진행 중인 작업이 없습니다.'); closeSeg(open, now); await save(); return { at: now }; }
     const t = body.taskId === 'break' ? BREAK : db.settings.tasks.find(x => x.id === body.taskId);
     if (!t) throw E(404, '작업을 찾을 수 없습니다.');
-    if (cur && cur.task === t.id) throw E(409, `이미 ${t.name} 중입니다.`);
-    closeSeg(open, now); open.segments.push({ task: t.id, name: t.name, start: now, end: null });
+    const seg = { task: t.id, name: t.name, start: now, end: null };
+    if (t.kind === 'item') {
+      const it = db.items.find(x => x.id === body.itemId); if (!it) throw E(400, '품목을 선택해 주세요.');
+      seg.item = { id: it.id, name: it.name }; seg.qty = null;
+    } else if (t.kind === 'sub') {
+      if (!(t.subs || []).includes(body.sub)) throw E(400, '세부 작업을 선택해 주세요.');
+      seg.sub = body.sub; seg.name = `${t.name} · ${body.sub}`;
+    }
+    if (cur && cur.task === t.id && (cur.item && cur.item.id) === (seg.item && seg.item.id) && cur.sub === seg.sub) throw E(409, `이미 ${seg.name} 중입니다.`);
+    closeSeg(open, now); open.segments.push(seg);
     await save(); return { at: now };
   }
+  if (route === 'POST /api/task/qty') { // 진행 중인 품목 작업의 수량 저장
+    if (auth.role !== 'worker') throw E(403, '직원 계정만 사용할 수 있습니다.');
+    const open = db.records.find(r => r.wid === auth.wid && !r.out);
+    const cur = open && (open.segments || []).find(x => !x.end);
+    if (!cur || !cur.item) throw E(409, '품목 작업 중에만 수량을 입력할 수 있습니다.');
+    const q = Number(body.qty); if (!Number.isInteger(q) || q < 0 || q > 1e6) throw E(400, '수량은 0 이상의 정수로 입력해 주세요.');
+    cur.qty = q; await save(); return {};
+  }
+  if (route === 'GET /api/items') return { items: db.items };
 
   if (auth.role !== 'admin') throw E(403, '권한이 없습니다.');
   let mm;
@@ -131,7 +154,20 @@ async function api(req, url, body, ip) {
     if (!name || name.length > 20 || name === BREAK.name) throw E(400, '작업 이름을 확인하세요. (20자 이내, "휴게"는 기본 제공)');
     if (db.settings.tasks.length >= 30) throw E(400, '작업은 최대 30개까지 만들 수 있습니다.');
     if (db.settings.tasks.some(t => t.name === name)) throw E(409, '같은 이름의 작업이 이미 있습니다.');
-    db.settings.tasks.push(newTask(name)); await save(); return {};
+    const kind = ['item', 'sub'].includes(body.kind) ? body.kind : '';
+    const subs = kind === 'sub' ? [...new Set(String(body.subs || '').split(',').map(s => s.trim()).filter(Boolean))].slice(0, 10).map(s => s.slice(0, 20)) : [];
+    if (kind === 'sub' && !subs.length) throw E(400, '세부 작업을 쉼표로 구분해 입력하세요. (예: 회의,사무업무)');
+    db.settings.tasks.push(newTask(name, kind, subs)); await save(); return {};
+  }
+  if (route === 'POST /api/admin/items') { // 품목 목록 전체 교체. 한 줄에 품목 하나, 탭/쉼표 뒤는 코드(선택)
+    const seen = new Set(), items = [];
+    for (const line of String(body.text || '').split(/\r?\n/)) {
+      const [n, c] = line.split(/\t|,/).map(s => s.trim()); if (!n) continue;
+      const name = n.slice(0, 80), code = (c || '').slice(0, 40), key = name + '\u0000' + code; if (seen.has(key)) continue; seen.add(key);
+      items.push({ id: 'i' + crypto.createHash('sha1').update(key).digest('hex').slice(0, 10), name, code });
+      if (items.length > 5000) throw E(400, '품목은 최대 5000개까지 넣을 수 있습니다.');
+    }
+    db.items = items; await save(); return { count: items.length };
   }
   if ((mm = /^DELETE \/api\/admin\/tasks\/(\w+)$/.exec(route))) {
     db.settings.tasks = db.settings.tasks.filter(t => t.id !== mm[1]); await save(); return {}; // 지난 기록은 작업 이름이 남아 있어 그대로 보임
