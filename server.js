@@ -41,6 +41,7 @@ async function loadDb() {
     const r = await pool.query("select v from kv where k='db'"); d = r.rows[0] && r.rows[0].v;
   } else if (fs.existsSync(DATA_FILE)) d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   db = d || { settings: { name: '봄찬', lat: null, lng: null, radius: 150, minWage: 10320, adminPin: hashPin(process.env.ADMIN_PIN || '0000') }, workers: [], records: [] };
+  if (!db.settings.tasks) { db.settings.tasks = DEFAULT_TASKS.map(newTask); save(); } // 기존 데이터에도 기본 작업 목록 추가
 }
 let chain = Promise.resolve();
 function save() {
@@ -61,12 +62,16 @@ function throttle(ip) { const f = fails.get(ip); if (f && f.n >= 10 && Date.now(
 function fail(ip) { const f = fails.get(ip); if (!f || Date.now() - f.t > 15 * 60e3) fails.set(ip, { n: 1, t: Date.now() }); else f.n++; }
 const pubWorker = w => ({ id: w.id, name: w.name, wage: w.wage });
 const validPin = p => /^\d{4,8}$/.test(String(p));
+const DEFAULT_TASKS = ['롯데출고', '대신출고', '선작업', '용차/밀크런 출고', '밀크런', '밀크런 이슈', '쉽먼트', '용차 준비', '입고', '운영관리', '현장정비'];
+const BREAK = { id: 'break', name: '휴게' };
+const newTask = name => ({ id: 't' + crypto.randomBytes(5).toString('hex'), name });
+const closeSeg = (r, t) => { const s = (r.segments || []).find(x => !x.end); if (s) s.end = t; };
 
 function state(auth) {
   const s = db.settings;
-  if (auth.role === 'admin') return { role: 'admin', settings: { name: s.name, radius: s.radius, minWage: s.minWage, hasLoc: s.lat != null }, workers: db.workers.map(pubWorker), records: db.records };
+  if (auth.role === 'admin') return { role: 'admin', settings: { name: s.name, radius: s.radius, minWage: s.minWage, hasLoc: s.lat != null }, tasks: s.tasks, workers: db.workers.map(pubWorker), records: db.records };
   const me = db.workers.find(w => w.id === auth.wid); if (!me) throw E(401, '계정을 찾을 수 없습니다.');
-  return { role: 'worker', settings: { name: s.name, radius: s.radius, hasLoc: s.lat != null }, me: pubWorker(me), records: db.records.filter(r => r.wid === me.id) };
+  return { role: 'worker', settings: { name: s.name, radius: s.radius, hasLoc: s.lat != null }, tasks: s.tasks, me: pubWorker(me), records: db.records.filter(r => r.wid === me.id) };
 }
 
 /* ---------- API ---------- */
@@ -97,16 +102,40 @@ async function api(req, url, body, ip) {
     const now = Date.now(), open = db.records.find(r => r.wid === auth.wid && !r.out);
     if (body.kind === 'in') {
       if (open) throw E(409, '이미 출근 상태입니다.');
-      db.records.push({ id: 'r' + crypto.randomBytes(6).toString('hex'), wid: auth.wid, date: kstDate(now), in: now, out: null, inLoc: loc, outLoc: null, manual: false });
+      db.records.push({ id: 'r' + crypto.randomBytes(6).toString('hex'), wid: auth.wid, date: kstDate(now), in: now, out: null, inLoc: loc, outLoc: null, manual: false, segments: [] });
     } else if (body.kind === 'out') {
       if (!open) throw E(409, '출근 기록이 없습니다.');
-      open.out = now; open.outLoc = loc;
+      closeSeg(open, now); open.out = now; open.outLoc = loc;
     } else throw E(400, '잘못된 요청입니다.');
+    await save(); return { at: now };
+  }
+
+  if (route === 'POST /api/task') { // 작업 시작/전환 (taskId 'stop' 이면 작업 종료)
+    if (auth.role !== 'worker') throw E(403, '직원 계정만 사용할 수 있습니다.');
+    const open = db.records.find(r => r.wid === auth.wid && !r.out);
+    if (!open) throw E(409, '먼저 출근해 주세요.');
+    open.segments = open.segments || [];
+    const cur = open.segments.find(x => !x.end), now = Date.now();
+    if (body.taskId === 'stop') { if (!cur) throw E(409, '진행 중인 작업이 없습니다.'); closeSeg(open, now); await save(); return { at: now }; }
+    const t = body.taskId === 'break' ? BREAK : db.settings.tasks.find(x => x.id === body.taskId);
+    if (!t) throw E(404, '작업을 찾을 수 없습니다.');
+    if (cur && cur.task === t.id) throw E(409, `이미 ${t.name} 중입니다.`);
+    closeSeg(open, now); open.segments.push({ task: t.id, name: t.name, start: now, end: null });
     await save(); return { at: now };
   }
 
   if (auth.role !== 'admin') throw E(403, '권한이 없습니다.');
   let mm;
+  if (route === 'POST /api/admin/tasks') {
+    const name = String(body.name || '').trim();
+    if (!name || name.length > 20 || name === BREAK.name) throw E(400, '작업 이름을 확인하세요. (20자 이내, "휴게"는 기본 제공)');
+    if (db.settings.tasks.length >= 30) throw E(400, '작업은 최대 30개까지 만들 수 있습니다.');
+    if (db.settings.tasks.some(t => t.name === name)) throw E(409, '같은 이름의 작업이 이미 있습니다.');
+    db.settings.tasks.push(newTask(name)); await save(); return {};
+  }
+  if ((mm = /^DELETE \/api\/admin\/tasks\/(\w+)$/.exec(route))) {
+    db.settings.tasks = db.settings.tasks.filter(t => t.id !== mm[1]); await save(); return {}; // 지난 기록은 작업 이름이 남아 있어 그대로 보임
+  }
   if (route === 'POST /api/admin/workers') {
     const name = String(body.name || '').trim(), wage = parseInt(body.wage, 10);
     if (!name || name.length > 20 || !validPin(body.pin) || !(wage > 0)) throw E(400, '이름, PIN(숫자 4~8자리), 시급을 확인하세요.');
@@ -128,7 +157,7 @@ async function api(req, url, body, ip) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(body.date) || !/^\d{2}:\d{2}$/.test(body.in) || !/^\d{2}:\d{2}$/.test(body.out)) throw E(400, '날짜와 시간을 확인하세요.');
     const a = Date.parse(`${body.date}T${body.in}:00+09:00`); let b = Date.parse(`${body.date}T${body.out}:00+09:00`);
     if (isNaN(a) || isNaN(b)) throw E(400, '날짜와 시간을 확인하세요.'); if (b <= a) b += 86400e3;
-    db.records.push({ id: 'r' + crypto.randomBytes(6).toString('hex'), wid: w.id, date: body.date, in: a, out: b, inLoc: null, outLoc: null, manual: true });
+    db.records.push({ id: 'r' + crypto.randomBytes(6).toString('hex'), wid: w.id, date: body.date, in: a, out: b, inLoc: null, outLoc: null, manual: true, segments: [] });
     await save(); return {};
   }
   if ((mm = /^DELETE \/api\/admin\/records\/(\w+)$/.exec(route))) {

@@ -42,6 +42,12 @@ th{color:var(--sub);font-weight:600}
 .stat{display:flex;justify-content:space-between;padding:6px 0;font-size:15px}
 .stat b{font-size:17px}
 .tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:#dcfce7;color:var(--gd)}
+.cur{text-align:center;font-size:20px;font-weight:700;margin-bottom:10px;color:var(--g)}
+.cur.brk{color:#b45309}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tk{height:64px;background:var(--bg);color:var(--tx);border:1px solid var(--bd);font-size:15px}
+.tk.on{background:var(--g);color:#fff;border-color:var(--g)}
+.tk.brkb.on{background:#d97706;border-color:#d97706}
 .login-logo{text-align:center;font-size:56px;margin:40px 0 4px}
 .login-t{text-align:center;font-size:28px;font-weight:800;color:var(--g);margin-bottom:24px}
 </style>
@@ -76,7 +82,9 @@ async function refresh(){S=await api('GET','/api/state');render()}
 function calc(r,wage){
   if(!r.out)return null;
   const total=Math.max(0,Math.round((r.out-r.in)/60000));
-  const brk=total>=480?60:total>=240?30:0;
+  // 휴게 버튼을 누른 기록이 있으면 그 시간만, 없으면 법정 기준으로 자동 차감
+  const bseg=(r.segments||[]).filter(s=>s.task==='break'&&s.end).reduce((a,s)=>a+Math.round((s.end-s.start)/60000),0);
+  const brk=bseg>0?Math.min(bseg,total):(total>=480?60:total>=240?30:0);
   const net=total-brk, reg=Math.min(net,480), ot=Math.max(net-480,0);
   return {total,brk,net,reg,ot,pay:wage*reg/60+wage*1.5*ot/60};
 }
@@ -93,7 +101,7 @@ function render(){
   a.className='wrap'+(S&&S.role==='admin'?' wide':'');
   if(!token||!S){a.innerHTML=loginView();return}
   a.innerHTML=S.role==='admin'?adminView():workerView();
-  tick();
+  tick();tickSeg();
 }
 function loginView(){
   return `<div class="login-logo">🌸</div><div class="login-t">봄펀치</div>
@@ -106,9 +114,29 @@ function loginView(){
     <button class="ghost" style="width:100%" data-act="alogin">관리자 로그인</button></div>
   <div class="msg ${ui.err?'err':'ok'}">${esc(ui.msg)}</div>`;
 }
+// 작업별 누적 분: {이름: 분}
+function taskTotals(records){
+  const m={};
+  records.forEach(r=>(r.segments||[]).forEach(s=>{
+    const mins=Math.round(((s.end||Date.now())-s.start)/60000);
+    if(mins>0)m[s.name]=(m[s.name]||0)+mins;
+  }));
+  return Object.entries(m).sort((a,b)=>b[1]-a[1]);
+}
+const taskRows=list=>list.map(([n,m])=>`<div class="stat"><span>${esc(n)}</span><b>${fmtMin(m)}</b></div>`).join('');
+const curSeg=r=>r&&(r.segments||[]).find(s=>!s.end);
+
 function workerView(){
   const w=S.me;
   const open=S.records.find(r=>!r.out);
+  const seg=curSeg(open);
+  const taskPanel=open?`<div class="card"><h2>지금 작업</h2>
+    <div class="cur ${seg&&seg.task==='break'?'brk':''}">${seg?`${esc(seg.name)} · <span id="seg" data-start="${seg.start}">00:00:00</span>`:'<span class="sub">작업을 선택하면 시간이 측정됩니다</span>'}</div>
+    <div class="grid">${S.tasks.map(t=>`<button class="tk ${seg&&seg.task===t.id?'on':''}" data-act="task" data-id="${t.id}">${esc(t.name)}</button>`).join('')}
+      <button class="tk brkb ${seg&&seg.task==='break'?'on':''}" data-act="task" data-id="break">☕ 휴게</button></div>
+    ${seg?'<button class="ghost" style="width:100%;margin-top:8px" data-act="task" data-id="stop">작업 끝내기</button>':''}
+  </div>`:'';
+  const totals=taskTotals(S.records.filter(r=>r.date.startsWith(ui.month)));
   const mine=S.records.filter(r=>r.date.startsWith(ui.month)).sort((a,b)=>b.in-a.in);
   let tm=0,tp=0;
   const rows=mine.map(r=>{const c=calc(r,w.wage);if(c){tm+=c.net;tp+=c.pay}
@@ -120,11 +148,13 @@ function workerView(){
     <div class="msg ${ui.err?'err':'ok'}" id="msg">${esc(ui.msg)}</div>
     ${open?`<div class="sub" style="text-align:center">출근 ${hm(open.in)} · 근무중</div>`:''}
   </div>
+  ${taskPanel}
   <div class="card"><div class="row"><h2 style="align-self:center">내 근무</h2><input type="month" id="mon" value="${ui.month}"></div>
     <div class="stat"><span>총 근무시간(휴게 제외)</span><b>${fmtMin(tm)}</b></div>
     <div class="stat"><span>예상 급여</span><b>${won(tp)}</b></div>
     <div class="sub">시급 ${won(w.wage)} · 8시간 초과분 1.5배 · 주휴수당·세금 미포함</div>
   </div>
+  ${totals.length?`<div class="card"><h2>이번 달 작업별 시간</h2>${taskRows(totals)}</div>`:''}
   <div class="card scroll"><table><tr><th>일</th><th>출근</th><th>퇴근</th><th>근무</th><th>급여</th></tr>${rows||'<tr><td colspan=5 class="sub">기록이 없습니다</td></tr>'}</table></div>`;
 }
 function adminView(){
@@ -136,10 +166,11 @@ function adminView(){
     const rs=S.records.filter(r=>r.date===t).sort((a,b)=>a.in-b.in);
     const rows=rs.map(r=>{const w=wm[r.wid];
       return `<tr><td>${esc(w?w.name:'?')}${r.manual?' <span class="sub">(수동)</span>':''}</td><td>${hm(r.in)}</td><td>${r.out?hm(r.out):'<span class="tag">근무중</span>'}</td>
+      <td>${r.out?'':(curSeg(r)?esc(curSeg(r).name):'<span class="sub">-</span>')}</td>
       <td><button class="sm ghost" data-act="delrec" data-id="${r.id}">삭제</button></td></tr>`}).join('');
     const opts=S.workers.map(w=>`<option value="${w.id}">${esc(w.name)}</option>`).join('');
     body=`<div class="card"><h2>오늘 (${t}) 출퇴근 · ${rs.filter(r=>!r.out).length}명 근무중</h2>
-      <div class="scroll"><table><tr><th>이름</th><th>출근</th><th>퇴근</th><th></th></tr>${rows||'<tr><td colspan=4 class="sub">아직 기록이 없습니다</td></tr>'}</table></div></div>
+      <div class="scroll"><table><tr><th>이름</th><th>출근</th><th>퇴근</th><th>현재 작업</th><th></th></tr>${rows||'<tr><td colspan=5 class="sub">아직 기록이 없습니다</td></tr>'}</table></div></div>
       <div class="card"><h2>누락된 기록 직접 입력</h2>
         <select id="mw"><option value="">직원 선택</option>${opts}</select>
         <input type="date" id="md" value="${t}">
@@ -158,7 +189,8 @@ function adminView(){
       <div class="scroll"><table><tr><th>이름</th><th>출근일</th><th>기본</th><th>연장</th><th>시급</th><th>급여</th></tr>
       ${rows||'<tr><td colspan=6 class="sub">직원을 먼저 등록하세요</td></tr>'}</table></div>
       <div class="stat" style="margin-top:8px"><span>합계 ${fmtMin(gm)}</span><b>${won(gp)}</b></div>
-      <div class="sub">휴게 자동차감(4h↑30분, 8h↑60분), 8h 초과 1.5배. 주휴·야간·휴일가산, 4대보험·세금은 미포함이니 최종 급여는 확인 후 지급하세요.</div></div>`;
+      <div class="sub">휴게 버튼 기록이 있으면 그 시간만, 없으면 자동차감(4h↑30분, 8h↑60분). 8h 초과 1.5배. 주휴·야간·휴일가산, 4대보험·세금은 미포함이니 최종 급여는 확인 후 지급하세요.</div></div>
+      ${(()=>{const t=taskTotals(S.records.filter(r=>r.date.startsWith(ui.month)));return t.length?`<div class="card"><h2>작업별 총 시간 (전 직원)</h2>${taskRows(t)}</div>`:''})()}`;
   }
   if(ui.tab==='workers'){
     const rows=S.workers.map(w=>`<tr><td>${esc(w.name)}</td><td>${won(w.wage)}</td>
@@ -170,7 +202,11 @@ function adminView(){
   }
   if(ui.tab==='settings'){
     const s=S.settings;
-    body=`<div class="card"><h2>근무지</h2>
+    body=`<div class="card"><h2>작업 종류 (직원 화면의 작업 버튼)</h2>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">${S.tasks.map(t=>`<span class="tag" style="font-size:14px;padding:6px 10px">${esc(t.name)} <a href="#" data-act="deltask" data-id="${t.id}" style="color:var(--red);text-decoration:none;margin-left:4px">✕</a></span>`).join('')||'<span class="sub">작업이 없습니다</span>'}</div>
+      <div class="row"><input id="tn" placeholder="새 작업 이름 (예: 검수)"><button data-act="addtask" style="margin-bottom:8px;flex:0 0 80px">추가</button></div>
+      <div class="sub">"휴게" 버튼은 기본으로 들어 있습니다. 작업을 지워도 지난 기록의 작업 이름은 그대로 남습니다.</div></div>
+      <div class="card"><h2>근무지</h2>
       <input id="sn" value="${esc(s.name)}" placeholder="근무지 이름">
       <div class="sub" style="margin-bottom:8px">${s.hasLoc?'📍 근무지 위치가 설정되어 있습니다.':'⚠️ 근무지 위치가 없어 현재는 어디서나 펀치할 수 있습니다.'}</div>
       <button class="ghost" style="width:100%;margin-bottom:8px" data-act="setloc">📍 지금 내 위치를 근무지로 설정 (근무지에서 누르세요)</button>
@@ -188,6 +224,12 @@ function tick(){
   const n=new Date();c.textContent=`${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
   d.textContent=n.toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
 }
+function tickSeg(){
+  const e=$('#seg');if(!e)return;
+  const s=Math.max(0,Math.floor((Date.now()-Number(e.dataset.start))/1000));
+  e.textContent=`${pad(Math.floor(s/3600))}:${pad(Math.floor(s%3600/60))}:${pad(s%60)}`;
+}
+setInterval(tickSeg,1000);
 setInterval(tick,1000);
 setInterval(()=>{ // 관리자 '오늘' 화면은 입력 중이 아닐 때 자동 새로고침
   if(S&&S.role==='admin'&&ui.tab==='today'&&!document.activeElement.matches('input,select'))refresh().catch(()=>{});
@@ -233,6 +275,13 @@ document.addEventListener('click',async e=>{
   else if(act==='logout')logout();
   else if(act==='in'||act==='out')punch(act);
   else if(act==='tab'){ui.tab=id;render()}
+  else if(act==='task'){
+    e.preventDefault();
+    try{await api('POST','/api/task',{taskId:id});await refresh()}
+    catch(er){alert(er.message);refresh().catch(()=>{})}
+  }
+  else if(act==='addtask'){const v=$('#tn').value;run(()=>api('POST','/api/admin/tasks',{name:v}))}
+  else if(act==='deltask'){e.preventDefault();if(confirm('이 작업 버튼을 지울까요? 지난 기록은 그대로 남습니다.'))run(()=>api('DELETE','/api/admin/tasks/'+id))}
   else if(act==='csv')downloadCSV();
   else if(act==='delrec'){if(confirm('이 기록을 삭제할까요?'))run(()=>api('DELETE','/api/admin/records/'+id))}
   else if(act==='delw'){if(confirm('직원과 모든 근무기록을 삭제할까요? 되돌릴 수 없습니다.'))run(()=>api('DELETE','/api/admin/workers/'+id))}
