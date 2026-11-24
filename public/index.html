@@ -59,6 +59,12 @@ textarea{width:100%;padding:12px;border:1px solid var(--bd);border-radius:10px;f
 .it.on{background:var(--g);color:#fff}.it.on .sub{color:#e5f5ea}
 .it[hidden]{display:none}
 .subbtn{width:100%;height:56px;margin-bottom:8px;background:var(--bg);color:var(--tx);border:1px solid var(--bd);font-size:17px}
+.inst{border-color:var(--g)}
+.gtabs{display:flex;gap:6px;margin-bottom:10px}
+.gtabs button{flex:1;padding:8px 4px;font-size:13px;background:var(--bg);color:var(--sub);border:1px solid var(--bd)}
+.gtabs button.on{background:var(--g);color:#fff;border-color:var(--g)}
+.stp{display:flex;gap:10px;align-items:flex-start;padding:6px 0;font-size:14px;line-height:1.5}
+.stp span{flex:0 0 24px;height:24px;border-radius:50%;background:var(--g);color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center}
 .login-logo{text-align:center;font-size:56px;margin:40px 0 4px}
 .login-t{text-align:center;font-size:28px;font-weight:800;color:var(--g);margin-bottom:24px}
 </style>
@@ -120,8 +126,33 @@ function render(){
   a.innerHTML=S.role==='admin'?adminView():workerView();
   tick();tickSeg();
 }
+/* ---------- 설치 안내 (홈 화면에 추가) ---------- */
+let deferredInstall=null;
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;if(!$('#sheet'))render()});
+const isStandalone=()=>matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
+function installCard(){
+  try{if(localStorage.getItem('bp_install_off'))return ''}catch(e){}
+  if(isStandalone())return '';
+  const ua=navigator.userAgent,g=new URLSearchParams(location.search).get('guide');   // ?guide=ios|android|kakao 는 미리보기용
+  // 내 폰 종류를 자동으로 찾아서 처음에 그 탭을 열어 둠 (카톡·네이버 앱 안이면 그쪽이 먼저)
+  const detected=g||(/KAKAOTALK|NAVER\(|Line\//i.test(ua)?'kakao':/iPhone|iPad|iPod/.test(ua)?'ios':/Android/.test(ua)?'android':null);
+  if(!detected)return '';   // PC 에서는 안내를 보여주지 않음
+  const sel=ui.guideTab||detected;
+  const stp=(n,t)=>`<div class="stp"><span>${n}</span><div>${t}</div></div>`;
+  const guides={
+    android:(deferredInstall?`<button style="width:100%;margin-bottom:8px" data-act="install">📲 앱 설치하기</button><div class="sub" style="margin-bottom:4px">누르면 설치 창이 떠요. 안 뜨면 아래 방법으로 하세요.</div>`:'')
+      +stp(1,'<b>크롬</b> 오른쪽 위 <b>⋮</b> 메뉴를 누르세요')+stp(2,'<b>홈 화면에 추가</b>(또는 앱 설치)를 누르세요')+stp(3,'<b>설치</b>를 누르면 홈 화면에 🌸 봄펀치가 생겨요'),
+    ios:stp(1,'<b>사파리</b>로 열고 아래쪽 <b>공유 버튼(□↑)</b>을 누르세요')+stp(2,'메뉴를 올려서 <b>홈 화면에 추가</b>를 누르세요')+stp(3,'오른쪽 위 <b>추가</b>를 누르면 홈 화면에 🌸 봄펀치가 생겨요'),
+    kakao:stp(1,'오른쪽 위(또는 아래) <b>⋮ / ⋯</b> 메뉴를 누르세요')+stp(2,'<b>다른 브라우저로 열기</b>를 누르세요')+stp(3,'크롬이나 사파리에서 열린 뒤 설치하세요 (위치 확인도 이래야 잘 됩니다)')
+  };
+  const tabs=[['android','🤖 안드로이드'],['ios','🍎 아이폰'],['kakao','💬 카톡·네이버']];
+  const warn=detected==='kakao'&&sel!=='kakao'?'<div class="sub" style="color:var(--red);margin-bottom:6px">⚠️ 지금 카톡·네이버 앱 안에서 열려 있어요. 설치하려면 먼저 "카톡·네이버"를 눌러 안내대로 하세요.</div>':'';
+  return `<div class="card inst"><div class="shh"><b>📲 앱처럼 설치하기</b><button class="ghost sm" data-act="instoff">닫기</button></div>
+    <div class="gtabs">${tabs.map(([k,l])=>`<button class="${sel===k?'on':''}" data-act="gtab" data-id="${k}">${l}</button>`).join('')}</div>
+    ${warn}${guides[sel]}<div class="sub" style="margin-top:6px">설치하면 주소를 다시 치지 않아도 되고, 앱처럼 전체 화면으로 열려요.</div></div>`;
+}
 function loginView(){
-  return `<div class="login-logo">🌸</div><div class="login-t">봄펀치</div>
+  return `<div class="login-logo">🌸</div><div class="login-t">봄펀치</div>${installCard()}
   <div class="card"><h2>직원 로그인</h2>
     <input id="ln" placeholder="이름" autocomplete="username">
     <input id="lp" type="password" inputmode="numeric" maxlength="8" placeholder="PIN 번호" autocomplete="current-password">
@@ -173,6 +204,7 @@ function workerView(){
   const rows=mine.map(r=>{const c=calc(r,w.wage);if(c){tm+=c.net;tp+=c.pay}
     return `<tr><td>${r.date.slice(5)}</td><td>${hm(r.in)}</td><td>${r.out?hm(r.out):'-'}</td><td>${c?fmtMin(c.net):'근무중'}</td><td>${c?won(c.pay):''}</td></tr>`}).join('');
   return `<header><h1>🌸 봄펀치</h1><button class="ghost sm" data-act="logout">로그아웃</button></header>
+  ${installCard()}
   <div class="card"><div class="sub" style="text-align:center">${esc(w.name)}님 · ${esc(S.settings.name)}</div>
     <div class="clock" id="clock"></div><div class="date" id="date"></div>
     <button class="punch ${open?'out':''}" data-act="${open?'out':'in'}" id="pb" ${ui.busy?'disabled':''}>${open?'퇴근하기':'출근하기'}</button>
@@ -405,6 +437,9 @@ document.addEventListener('click',async e=>{
   else if(act==='qskip'){closeSheet();askQty._res({skip:true})}
   else if(act==='qcancel'){closeSheet();askQty._res(null)}
   else if(act==='closesheet')closeSheet();
+  else if(act==='install'&&deferredInstall){deferredInstall.prompt();await deferredInstall.userChoice.catch(()=>{});deferredInstall=null;render()}
+  else if(act==='gtab'){ui.guideTab=id;render()}
+  else if(act==='instoff'){try{localStorage.setItem('bp_install_off','1')}catch(er){}render()}
   else if(act==='selitem'){
     document.querySelectorAll('.it.on').forEach(x=>x.classList.remove('on'));b.classList.add('on');
     const st=$('#istart');st.dataset.item=id;st.disabled=false;$('#isel').textContent='선택: '+b.querySelector('b').textContent;

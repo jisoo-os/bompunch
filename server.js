@@ -229,7 +229,7 @@ function serveStatic(req, res, url) {
   let p = decodeURIComponent(url.pathname); if (p === '/') p = '/index.html';
   const f = path.join(PUBLIC, path.normalize(p));
   if (!f.startsWith(PUBLIC + path.sep) || !fs.existsSync(f) || !fs.statSync(f).isFile()) { res.writeHead(404); return res.end('Not found'); }
-  res.writeHead(200, { 'content-type': TYPES[path.extname(f)] || 'application/octet-stream', 'cache-control': p === '/sw.js' ? 'no-cache' : 'public, max-age=300' });
+  res.writeHead(200, { 'content-type': TYPES[path.extname(f)] || 'application/octet-stream', 'cache-control': (p === '/sw.js' || p.endsWith('.html')) ? 'no-cache' : 'public, max-age=300' });
   fs.createReadStream(f).pipe(res);
 }
 const server = http.createServer(async (req, res) => {
