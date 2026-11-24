@@ -255,9 +255,12 @@ async function punch(kind){
 }
 function downloadCSV(){
   const wm=Object.fromEntries(S.workers.map(w=>[w.id,w]));
-  const lines=[['이름','날짜','출근','퇴근','총분','휴게분','기본분','연장분','시급','급여']];
-  S.records.filter(r=>r.date.startsWith(ui.month)&&r.out&&wm[r.wid]).sort((a,b)=>a.in-b.in).forEach(r=>{
-    const w=wm[r.wid],c=calc(r,w.wage);lines.push([w.name,r.date,hm(r.in),hm(r.out),c.total,c.brk,c.reg,c.ot,w.wage,Math.round(c.pay)])});
+  const recs=S.records.filter(r=>r.date.startsWith(ui.month)&&r.out&&wm[r.wid]).sort((a,b)=>a.in-b.in);
+  const names=taskTotals(recs).map(x=>x[0]);   // 작업별 열: 이번 달 많이 쓴 작업 순
+  const segMin=(r,n)=>(r.segments||[]).filter(s=>s.name===n).reduce((a,s)=>a+Math.round(((s.end||r.out)-s.start)/60000),0);
+  const lines=[['이름','날짜','출근','퇴근','총분','휴게분','기본분','연장분','시급','급여',...names.map(n=>n+'(분)')]];
+  recs.forEach(r=>{
+    const w=wm[r.wid],c=calc(r,w.wage);lines.push([w.name,r.date,hm(r.in),hm(r.out),c.total,c.brk,c.reg,c.ot,w.wage,Math.round(c.pay),...names.map(n=>segMin(r,n)||'')])});
   const csv='﻿'+lines.map(l=>l.map(v=>{v=String(v);if(/^[=+\-@]/.test(v))v="'"+v;return `"${v.replace(/"/g,'""')}"`}).join(',')).join('\r\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download=`봄펀치_${ui.month}.csv`;a.click();
