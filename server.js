@@ -45,6 +45,13 @@ async function loadDb() {
   if (!db.items) { db.items = []; changed = true; }
   if (!db.settings.tasks) { db.settings.tasks = DEFAULT_TASKS.map(n => Object.assign(newTask(n), TASK_META[n] || {})); changed = true; } // 기존 데이터에도 기본 작업 목록 추가
   db.settings.tasks.forEach(t => { if (!('kind' in t)) { Object.assign(t, { kind: '' }, TASK_META[t.name] || {}); changed = true; } }); // 이전 버전 작업에 종류 부여
+  if (!(db.settings.taskVer >= 2)) { // 밀크런·쉽먼트는 여러 품목 선택, 밀크런 이슈는 특이사항 입력으로 전환 (한 번만)
+    db.settings.tasks.forEach(t => {
+      if ((t.name === '밀크런' || t.name === '쉽먼트') && t.kind === 'item') t.kind = 'multi';
+      if (t.name === '밀크런 이슈' && !t.kind) t.kind = 'memo';
+    });
+    db.settings.taskVer = 2; changed = true;
+  }
   if (changed) save();
 }
 let chain = Promise.resolve();
@@ -68,10 +75,21 @@ const pubWorker = w => ({ id: w.id, name: w.name, wage: w.wage });
 const validPin = p => /^\d{4,8}$/.test(String(p));
 const DEFAULT_TASKS = ['롯데출고', '대신출고', '선작업', '용차/밀크런 출고', '밀크런', '밀크런 이슈', '쉽먼트', '용차 준비', '입고', '운영관리', '현장정비'];
 const BREAK = { id: 'break', name: '휴게' };
-// kind: 'item' = 품목 선택 + 수량 입력, 'sub' = 세부 작업 선택, '' = 일반
+// kind: 'item' = 품목 1개 + 수량, 'multi' = 품목 여러 개 + 각각 수량, 'memo' = 특이사항 입력, 'sub' = 세부 작업 선택, '' = 일반
 const newTask = (name, kind, subs) => ({ id: 't' + crypto.randomBytes(5).toString('hex'), name, kind: kind || '', ...(subs && subs.length ? { subs } : {}) });
-const TASK_META = { '선작업': { kind: 'item' }, '밀크런': { kind: 'item' }, '쉽먼트': { kind: 'item' }, '운영관리': { kind: 'sub', subs: ['회의', '사무업무', '쿠팡서류'] } };
+const TASK_META = { '선작업': { kind: 'item' }, '밀크런': { kind: 'multi' }, '쉽먼트': { kind: 'multi' }, '밀크런 이슈': { kind: 'memo' }, '운영관리': { kind: 'sub', subs: ['회의', '사무업무', '쿠팡서류'] } };
 const closeSeg = (r, t) => { const s = (r.segments || []).find(x => !x.end); if (s) s.end = t; };
+const hasJob = s => !!(s && (s.item || s.items || s.memo !== undefined)); // 수량이나 특이사항을 적는 작업
+// 수량·특이사항을 저장할 대상: 지금 하는 작업, 휴게 중이면 쉬기 직전 작업
+function jobSeg(segs) {
+  const cur = segs.find(x => !x.end); if (!cur) return null;
+  if (hasJob(cur)) return cur;
+  if (cur.task === 'break' && cur.resume) { const p = segs[segs.indexOf(cur) - 1]; if (hasJob(p)) return p; }
+  return null;
+}
+const segKey = s => [(s.item && s.item.id) || '', (s.items || []).map(x => x.id).sort().join(), s.sub || ''].join('|');
+const toQty = v => { const q = Number(v); if (String(v).trim() === '' || !Number.isInteger(q) || q < 0 || q > 1e6) throw E(400, '수량은 0 이상의 정수로 입력해 주세요.'); return q; };
+const findItem = id => { const it = db.items.find(x => x.id === id); if (!it) throw E(400, '품목을 선택해 주세요.'); return { id: it.id, name: it.name, code: it.code }; };
 
 function state(auth) {
   const s = db.settings;
@@ -125,8 +143,10 @@ async function api(req, url, body, ip) {
     if (body.taskId === 'stop') { if (!cur) throw E(409, '진행 중인 작업이 없습니다.'); closeSeg(open, now); await save(); return { at: now }; }
     if (body.taskId === 'resume') { // 휴게 끝내고, 쉬기 전에 하던 작업(품목 포함)을 그대로 이어서 시작
       if (!cur || cur.task !== 'break' || !cur.resume) throw E(409, '이어서 할 작업이 없습니다.');
-      const r = cur.resume, seg = { task: r.task, name: r.name, start: now, end: null };
+      const r = cur.resume, seg = { task: r.task, name: r.name, start: now, end: null, cont: true }; // cont: 휴게 전 작업에서 이어짐
       if (r.item) { seg.item = r.item; seg.qty = null; }
+      if (r.items) seg.items = r.items.map(x => ({ ...x, qty: null }));
+      if (r.memo) seg.memo = '';
       if (r.sub) seg.sub = r.sub;
       closeSeg(open, now); open.segments.push(seg); await save(); return { at: now };
     }
@@ -134,28 +154,45 @@ async function api(req, url, body, ip) {
     if (!t) throw E(404, '작업을 찾을 수 없습니다.');
     const seg = { task: t.id, name: t.name, start: now, end: null };
     if (t.id === 'break' && cur && cur.task !== 'break') { // 쉬기 전에 하던 작업을 기억해 둠
-      seg.resume = { task: cur.task, name: cur.name, ...(cur.item ? { item: cur.item } : {}), ...(cur.sub ? { sub: cur.sub } : {}) };
+      seg.resume = { task: cur.task, name: cur.name, ...(cur.item ? { item: cur.item } : {}),
+        ...(cur.items ? { items: cur.items.map(({ qty, ...x }) => x) } : {}), ...(cur.memo !== undefined ? { memo: true } : {}), ...(cur.sub ? { sub: cur.sub } : {}) };
     }
     if (t.kind === 'item') {
-      const it = db.items.find(x => x.id === body.itemId); if (!it) throw E(400, '품목을 선택해 주세요.');
-      seg.item = { id: it.id, name: it.name }; seg.qty = null;
+      seg.item = findItem(body.itemId); seg.qty = null;
+    } else if (t.kind === 'multi') {
+      const ids = [...new Set(Array.isArray(body.itemIds) ? body.itemIds : [])];
+      if (!ids.length || ids.length > 20) throw E(400, '품목을 1개에서 20개까지 선택해 주세요.');
+      seg.items = ids.map(id => ({ ...findItem(id), qty: null }));
+    } else if (t.kind === 'memo') {
+      seg.memo = '';
     } else if (t.kind === 'sub') {
       if (!(t.subs || []).includes(body.sub)) throw E(400, '세부 작업을 선택해 주세요.');
       seg.sub = body.sub; seg.name = `${t.name} · ${body.sub}`;
     }
-    if (cur && cur.task === t.id && (cur.item && cur.item.id) === (seg.item && seg.item.id) && cur.sub === seg.sub) throw E(409, `이미 ${seg.name} 중입니다.`);
+    if (cur && cur.task === t.id && segKey(cur) === segKey(seg)) throw E(409, `이미 ${seg.name} 중입니다.`);
     closeSeg(open, now); open.segments.push(seg);
     await save(); return { at: now };
   }
-  if (route === 'POST /api/task/qty') { // 진행 중인 품목 작업의 수량 저장
+  if (route === 'POST /api/task/qty') { // 품목 작업의 수량 저장 (품목 1개: qty, 여러 개: qtys {품목id: 수량})
     if (auth.role !== 'worker') throw E(403, '직원 계정만 사용할 수 있습니다.');
     const open = db.records.find(r => r.wid === auth.wid && !r.out);
-    const segs = (open && open.segments) || [], cur = segs.find(x => !x.end);
-    let target = cur && cur.item ? cur : null;
-    if (!target && cur && cur.task === 'break' && cur.resume && cur.resume.item) { const p = segs[segs.indexOf(cur) - 1]; if (p && p.item) target = p; } // 휴게 중이면 쉬기 전 품목 작업에 저장
-    if (!target) throw E(409, '품목 작업 중에만 수량을 입력할 수 있습니다.');
-    const q = Number(body.qty); if (!Number.isInteger(q) || q < 0 || q > 1e6) throw E(400, '수량은 0 이상의 정수로 입력해 주세요.');
-    target.qty = q; await save(); return {};
+    const target = jobSeg((open && open.segments) || []);
+    if (!target || !(target.item || target.items)) throw E(409, '품목 작업 중에만 수량을 입력할 수 있습니다.');
+    if (target.items) {
+      const list = Object.entries(body.qtys || {}).map(([id, v]) => [target.items.find(x => x.id === id), toQty(v)]);
+      if (!list.length || list.some(([x]) => !x)) throw E(400, '수량을 확인해 주세요.');
+      list.forEach(([x, q]) => { x.qty = q; });
+    } else target.qty = toQty(body.qty);
+    await save(); return {};
+  }
+  if (route === 'POST /api/task/memo') { // 특이사항 저장
+    if (auth.role !== 'worker') throw E(403, '직원 계정만 사용할 수 있습니다.');
+    const open = db.records.find(r => r.wid === auth.wid && !r.out);
+    const target = jobSeg((open && open.segments) || []);
+    if (!target || target.memo === undefined) throw E(409, '특이사항을 적는 작업 중이 아닙니다.');
+    const memo = String(body.memo || '').trim();
+    if (memo.length > 500) throw E(400, '특이사항은 500자까지 적을 수 있습니다.');
+    target.memo = memo; await save(); return {};
   }
   if (route === 'GET /api/items') return { items: db.items };
 
@@ -166,7 +203,7 @@ async function api(req, url, body, ip) {
     if (!name || name.length > 20 || name === BREAK.name) throw E(400, '작업 이름을 확인하세요. (20자 이내, "휴게"는 기본 제공)');
     if (db.settings.tasks.length >= 30) throw E(400, '작업은 최대 30개까지 만들 수 있습니다.');
     if (db.settings.tasks.some(t => t.name === name)) throw E(409, '같은 이름의 작업이 이미 있습니다.');
-    const kind = ['item', 'sub'].includes(body.kind) ? body.kind : '';
+    const kind = ['item', 'multi', 'memo', 'sub'].includes(body.kind) ? body.kind : '';
     const subs = kind === 'sub' ? [...new Set(String(body.subs || '').split(',').map(s => s.trim()).filter(Boolean))].slice(0, 10).map(s => s.slice(0, 20)) : [];
     if (kind === 'sub' && !subs.length) throw E(400, '세부 작업을 쉼표로 구분해 입력하세요. (예: 회의,사무업무)');
     db.settings.tasks.push(newTask(name, kind, subs)); await save(); return {};

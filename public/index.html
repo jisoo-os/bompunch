@@ -65,6 +65,11 @@ textarea{width:100%;padding:12px;border:1px solid var(--bd);border-radius:10px;f
 .gtabs button.on{background:var(--g);color:#fff;border-color:var(--g)}
 .stp{display:flex;gap:10px;align-items:flex-start;padding:6px 0;font-size:14px;line-height:1.5}
 .stp span{flex:0 0 24px;height:24px;border-radius:50%;background:var(--g);color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center}
+.qrow{display:flex;align-items:center;gap:8px}
+.qrow b{flex:1;font-size:14px;margin-bottom:8px}
+.qrow input{flex:0 0 100px;width:100px}
+.qlist{overflow-y:auto;max-height:50vh}
+.memo{padding:8px 0;border-bottom:1px solid var(--bd);white-space:pre-wrap;word-break:break-word}
 .login-logo{text-align:center;font-size:56px;margin:40px 0 4px}
 .login-t{text-align:center;font-size:28px;font-weight:800;color:var(--g);margin-bottom:24px}
 </style>
@@ -171,16 +176,36 @@ function taskTotals(records){
   }));
   return Object.entries(m).sort((a,b)=>b[1]-a[1]);
 }
-// 품목별 작업량: [{item,task,qty,min}] 수량 많은 순
+// 작업 구간의 품목 목록 (품목 1개 작업과 여러 개 작업을 같은 모양으로)
+const itemsOf=s=>(s&&(s.items||(s.item?[{...s.item,qty:s.qty}]:null)))||[];
+const itemLabel=list=>list.length?list[0].name+(list.length>1?` 외 ${list.length-1}개`:''):'';
+// 품목별 작업량: [{item,task,qty,min}] 수량 많은 순. 여러 품목을 함께 한 시간은 품목 수로 나눔
 function itemStats(records){
   const m={};
   records.forEach(r=>(r.segments||[]).forEach(s=>{
-    if(!s.item)return;
-    const k=s.item.name+'\u0000'+s.name;
-    const x=m[k]||(m[k]={item:s.item.name,task:s.name,qty:0,min:0});
-    x.qty+=s.qty||0;x.min+=Math.round(((s.end||Date.now())-s.start)/60000);
+    const list=itemsOf(s);
+    list.forEach(it=>{
+      const k=it.name+'\u0000'+s.name;
+      const x=m[k]||(m[k]={item:it.name,task:s.name,qty:0,min:0});
+      x.qty+=it.qty||0;x.min+=((s.end||r.out||Date.now())-s.start)/60000/list.length;
+    });
   }));
-  return Object.values(m).sort((a,b)=>b.qty-a.qty||b.min-a.min);
+  return Object.values(m).map(x=>({...x,min:Math.round(x.min)})).sort((a,b)=>b.qty-a.qty||b.min-a.min);
+}
+function memoCard(records,wm,title){
+  const list=[];
+  records.forEach(r=>(r.segments||[]).forEach(s=>{if(s.memo)list.push({at:s.start,date:r.date,name:wm[r.wid]?wm[r.wid].name:'?',task:s.name,memo:s.memo})}));
+  list.sort((a,b)=>b.at-a.at);
+  return list.length?`<div class="card"><h2>📝 ${title} (${list.length}건)</h2>${list.map(x=>`<div class="memo"><div class="sub">${x.date.slice(5)} ${hm(x.at)} · ${esc(x.name)} · ${esc(x.task)}</div><div>${esc(x.memo)}</div></div>`).join('')}</div>`:'';
+}
+// 관리자 화면의 "현재 작업" 설명
+function segDesc(s){
+  const list=itemsOf(s);
+  let t=esc(s.name);
+  if(list.length)t+=' / '+list.map(i=>esc(i.name)+(i.qty!=null?` (${i.qty}개)`:'')).join(', ');
+  if(s.memo)t+=' / '+esc(s.memo.length>30?s.memo.slice(0,30)+'…':s.memo);
+  if(s.resume)t+=` <span class="sub">(${esc(s.resume.name)} 중 잠시)</span>`;
+  return t;
 }
 const taskRows=list=>list.map(([n,m])=>`<div class="stat"><span>${esc(n)}</span><b>${fmtMin(m)}</b></div>`).join('');
 const curSeg=r=>r&&(r.segments||[]).find(s=>!s.end);
@@ -191,9 +216,10 @@ function workerView(){
   const seg=curSeg(open);
   const taskPanel=open?`<div class="card"><h2>지금 작업</h2>
     <div class="cur ${seg&&seg.task==='break'?'brk':''}">${seg?`${esc(seg.name)} · <span id="seg" data-start="${seg.start}">00:00:00</span>`:'<span class="sub">작업을 선택하면 시간이 측정됩니다</span>'}</div>
-    ${seg&&seg.task==='break'&&seg.resume?`<button style="width:100%;height:60px;font-size:17px;margin-bottom:10px;background:var(--bl)" data-act="resume">▶ ${esc(seg.resume.name)}${seg.resume.item?' · '+esc(seg.resume.item.name):''} 이어서 하기</button>`:''}
-    ${seg&&seg.item?`<div class="itemrow"><div style="margin-bottom:6px"><b>${esc(seg.item.name)}</b></div>
-      <div class="row"><input id="qty" inputmode="numeric" placeholder="몇 개 했나요?" value="${seg.qty??''}"><button data-act="saveqty" style="flex:0 0 80px;margin-bottom:8px">저장</button></div></div>`:''}
+    ${seg&&seg.task==='break'&&seg.resume?`<button style="width:100%;min-height:60px;font-size:17px;margin-bottom:10px;background:var(--bl)" data-act="resume">▶ ${esc(seg.resume.name)}${itemsOf(seg.resume).length?' · '+esc(itemLabel(itemsOf(seg.resume))):''} 이어서 하기</button>`:''}
+    ${itemsOf(seg).length?`<div class="itemrow">${itemsOf(seg).map(i=>`<div class="qrow"><b>${esc(i.name)}</b><input class="qi" data-id="${i.id}" inputmode="numeric" placeholder="몇 개?" value="${i.qty??''}"></div>`).join('')}
+      <button data-act="saveqty" style="width:100%">수량 저장</button></div>`:''}
+    ${seg&&seg.memo!==undefined?`<div class="itemrow"><textarea id="memo" rows="3" maxlength="500" placeholder="특이사항을 적어 주세요">${esc(seg.memo)}</textarea><button data-act="savememo" style="width:100%">특이사항 저장</button></div>`:''}
     <div class="grid">${S.tasks.map(t=>`<button class="tk ${seg&&seg.task===t.id?'on':''}" data-act="task" data-id="${t.id}">${esc(t.name)}</button>`).join('')}
       <button class="tk brkb ${seg&&seg.task==='break'?'on':''}" data-act="task" data-id="break">☕ 휴게</button></div>
     ${seg?'<button class="ghost" style="width:100%;margin-top:8px" data-act="task" data-id="stop">작업 끝내기</button>':''}
@@ -229,11 +255,12 @@ function adminView(){
     const rs=S.records.filter(r=>r.date===t).sort((a,b)=>a.in-b.in);
     const rows=rs.map(r=>{const w=wm[r.wid];
       return `<tr><td>${esc(w?w.name:'?')}${r.manual?' <span class="sub">(수동)</span>':''}</td><td>${hm(r.in)}</td><td>${r.out?hm(r.out):'<span class="tag">근무중</span>'}</td>
-      <td>${r.out?'':(curSeg(r)?esc(curSeg(r).name)+(curSeg(r).item?' / '+esc(curSeg(r).item.name)+(curSeg(r).qty!=null?' ('+curSeg(r).qty+'개)':''):(curSeg(r).resume?' <span class="sub">('+esc(curSeg(r).resume.name)+' 중 잠시)</span>':'')):'<span class="sub">-</span>')}</td>
+      <td style="white-space:normal">${r.out?'':(curSeg(r)?segDesc(curSeg(r)):'<span class="sub">-</span>')}</td>
       <td><button class="sm ghost" data-act="delrec" data-id="${r.id}">삭제</button></td></tr>`}).join('');
     const opts=S.workers.map(w=>`<option value="${w.id}">${esc(w.name)}</option>`).join('');
     body=`<div class="card"><h2>오늘 (${t}) 출퇴근 · ${rs.filter(r=>!r.out).length}명 근무중</h2>
       <div class="scroll"><table><tr><th>이름</th><th>출근</th><th>퇴근</th><th>현재 작업</th><th></th></tr>${rows||'<tr><td colspan=5 class="sub">아직 기록이 없습니다</td></tr>'}</table></div></div>
+      ${memoCard(rs,wm,'오늘 특이사항')}
       <div class="card"><h2>누락된 기록 직접 입력</h2>
         <select id="mw"><option value="">직원 선택</option>${opts}</select>
         <input type="date" id="md" value="${t}">
@@ -255,7 +282,8 @@ function adminView(){
       <div class="sub">휴게 버튼 기록이 있으면 그 시간만, 없으면 자동차감(4h↑30분, 8h↑60분). 8h 초과 1.5배. 주휴·야간·휴일가산, 4대보험·세금은 미포함이니 최종 급여는 확인 후 지급하세요.</div></div>
       ${(()=>{const t=taskTotals(S.records.filter(r=>r.date.startsWith(ui.month)));return t.length?`<div class="card"><h2>작업별 총 시간 (전 직원)</h2>${taskRows(t)}</div>`:''})()}
       ${(()=>{const p=itemStats(S.records.filter(r=>r.date.startsWith(ui.month)));return p.length?`<div class="card scroll"><div class="row"><h2 style="align-self:center">품목별 작업량</h2><button class="sm" data-act="csvitems" style="flex:0 0 auto;margin-bottom:8px">품목 CSV</button></div>
-        <table><tr><th>품목</th><th>작업</th><th>수량</th><th>시간</th></tr>${p.map(x=>`<tr><td>${esc(x.item)}</td><td>${esc(x.task)}</td><td>${x.qty}</td><td>${fmtMin(x.min)}</td></tr>`).join('')}</table></div>`:''})()}`;
+        <table><tr><th>품목</th><th>작업</th><th>수량</th><th>시간</th></tr>${p.map(x=>`<tr><td>${esc(x.item)}</td><td>${esc(x.task)}</td><td>${x.qty}</td><td>${fmtMin(x.min)}</td></tr>`).join('')}</table><div class="sub">여러 품목을 함께 한 시간은 품목 수로 나눠 표시합니다.</div></div>`:''})()}
+      ${memoCard(S.records.filter(r=>r.date.startsWith(ui.month)),wm,'이번 달 특이사항')}`;
   }
   if(ui.tab==='workers'){
     const rows=S.workers.map(w=>`<tr><td>${esc(w.name)}</td><td>${won(w.wage)}</td>
@@ -268,12 +296,12 @@ function adminView(){
   if(ui.tab==='settings'){
     const s=S.settings;
     body=`<div class="card"><h2>작업 종류 (직원 화면의 작업 버튼)</h2>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">${S.tasks.map(t=>`<span class="tag" style="font-size:14px;padding:6px 10px">${t.kind==='item'?'📦 ':t.kind==='sub'?'▾ ':''}${esc(t.name)} <a href="#" data-act="deltask" data-id="${t.id}" style="color:var(--red);text-decoration:none;margin-left:4px">✕</a></span>`).join('')||'<span class="sub">작업이 없습니다</span>'}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">${S.tasks.map(t=>`<span class="tag" style="font-size:14px;padding:6px 10px">${({item:'📦 ',multi:'📦+ ',memo:'📝 ',sub:'▾ '})[t.kind]||''}${esc(t.name)} <a href="#" data-act="deltask" data-id="${t.id}" style="color:var(--red);text-decoration:none;margin-left:4px">✕</a></span>`).join('')||'<span class="sub">작업이 없습니다</span>'}</div>
       <input id="tn" placeholder="새 작업 이름 (예: 검수)">
-      <select id="tk"><option value="">일반 작업</option><option value="item">📦 품목 선택 + 수량 입력</option><option value="sub">▾ 세부 작업 선택</option></select>
+      <select id="tk"><option value="">일반 작업</option><option value="item">📦 품목 1개 선택 + 수량</option><option value="multi">📦+ 품목 여러 개 선택 + 수량</option><option value="memo">📝 특이사항 입력</option><option value="sub">▾ 세부 작업 선택</option></select>
       <input id="ts" placeholder="세부 작업 (쉼표로 구분, '세부 작업 선택'일 때만) 예: 회의,사무업무">
       <button style="width:100%;margin-bottom:8px" data-act="addtask">작업 추가</button>
-      <div class="sub">📦는 누르면 품목을 검색해 고르고 수량을 적는 작업, ▾는 세부 작업을 고르는 작업입니다. "휴게"는 기본으로 들어 있고, 작업을 지워도 지난 기록은 그대로 남습니다.</div></div>
+      <div class="sub">📦는 품목 1개, 📦+는 품목 여러 개를 골라 수량을 적고, 📝는 특이사항을 적고, ▾는 세부 작업을 고릅니다. "휴게"는 기본으로 들어 있고, 작업을 지워도 지난 기록은 그대로 남습니다.</div></div>
       <div class="card"><h2>품목 목록 (📦 작업에서 선택)</h2>
       <div class="sub" style="margin-bottom:8px">현재 <b>${S.itemCount}</b>개 등록됨. 아래에 붙여 넣고 저장하면 <b>전체가 교체</b>됩니다.</div>
       <textarea id="itx" rows="6" placeholder="한 줄에 품목 하나. 엑셀에서 품목명(과 코드) 열을 복사해 붙여 넣으세요.&#10;예) 코코칩 57L&#10;예) 코코칩 57L, A-1001"></textarea>
@@ -317,53 +345,80 @@ async function openItemSheet(t){
   s.innerHTML=`<div class="shbg" data-act="closesheet"></div><div class="sh"><div class="shh"><b>${esc(t.name)} · 품목 선택</b><button class="ghost sm" data-act="closesheet">닫기</button></div><div class="sub">불러오는 중…</div></div>`;
   let items;try{items=await loadItems()}catch(er){closeSheet();return alert(er.message)}
   const list=items.map(i=>`<div class="it" data-act="selitem" data-id="${i.id}" data-s="${esc((i.name+' '+i.code).toLowerCase())}"><b>${esc(i.name)}</b>${i.code?` <span class="sub">${esc(i.code)}</span>`:''}</div>`).join('');
+  const multi=t.kind==='multi';
   s.innerHTML=`<div class="shbg" data-act="closesheet"></div><div class="sh">
-    <div class="shh"><b>${esc(t.name)} · 품목 선택</b><button class="ghost sm" data-act="closesheet">닫기</button></div>
+    <div class="shh"><b>${esc(t.name)} · 품목 선택${multi?' (여러 개 가능)':''}</b><button class="ghost sm" data-act="closesheet">닫기</button></div>
     <input id="isearch" placeholder="품목 검색 (${items.length}개)" autocomplete="off">
     <div class="itlist">${list||'<div class="sub" style="padding:12px">등록된 품목이 없습니다. 관리자에게 품목 등록을 요청하세요.</div>'}</div>
-    <div class="sub" id="isel" style="margin-bottom:8px">품목을 눌러 선택하세요</div>
-    <button id="istart" style="width:100%" disabled data-act="startitem" data-id="${t.id}">시작</button></div>`;
+    <div class="sub" id="isel" style="margin-bottom:8px">${multi?'할 품목을 모두 눌러 선택하세요 (다시 누르면 해제)':'품목을 눌러 선택하세요'}</div>
+    <button id="istart" style="width:100%" disabled data-act="startitem" data-id="${t.id}" data-multi="${multi?1:''}">시작</button></div>`;
 }
 function openSubSheet(t){
   sheetEl().innerHTML=`<div class="shbg" data-act="closesheet"></div><div class="sh"><div class="shh"><b>${esc(t.name)}</b><button class="ghost sm" data-act="closesheet">닫기</button></div>
     ${(t.subs||[]).map(x=>`<button class="subbtn" data-act="startsub" data-id="${t.id}" data-sub="${esc(x)}">${esc(x)}</button>`).join('')}</div>`;
 }
-// 수량을 물어봐야 하는 품목 작업: 지금 하는 품목 작업, 또는 휴게 중이면 쉬기 직전에 하던 품목 작업
+// 수량·특이사항을 적는 작업: 지금 하는 작업, 또는 휴게 중이면 쉬기 직전에 하던 작업
+const hasJob=s=>!!(s&&(itemsOf(s).length||s.memo!==undefined));
 function pendingSeg(r){
   const segs=(r&&r.segments)||[],cur=segs.find(s=>!s.end);
   if(!cur)return null;
-  if(cur.item)return cur;
-  if(cur.task==='break'&&cur.resume&&cur.resume.item){const p=segs[segs.indexOf(cur)-1];return p&&p.item?p:null}
+  if(hasJob(cur))return cur;
+  if(cur.task==='break'&&cur.resume){const p=segs[segs.indexOf(cur)-1];return hasJob(p)?p:null}
   return null;
 }
-// 수량 입력 창: {qty} 저장 / {skip:true} 수량 없이 계속 / null 취소
-function askQty(seg,prior){
+const saveQtys=(seg,map)=>api('POST','/api/task/qty',seg.items?{qtys:map}:{qty:map[seg.item.id]});
+// 화면 입력칸 중 값이 있는 것만 {품목id: 값}
+function readQtys(sel){
+  const map={};
+  document.querySelectorAll(sel).forEach(el=>{const v=el.value.trim();if(v!=='')map[el.dataset.id]=v});
+  return map;
+}
+// 마무리 입력 창: {qtys} 또는 {memo} 저장 / {skip:true} 없이 계속 / null 취소
+function askSheet(title,body,skipLabel){
   return new Promise(res=>{
-    askQty._res=res;
+    askSheet._res=res;
     sheetEl().innerHTML=`<div class="shbg" data-act="qcancel"></div><div class="sh">
-      <div class="shh"><b>수량 입력</b></div>
-      <div style="margin-bottom:10px"><b>${esc(seg.item.name)}</b><div class="sub">${esc(seg.name)} 작업을 마칩니다. 몇 개 하셨나요?${prior?`<br>이 작업에서 앞서 입력한 ${prior}개는 합쳐집니다. 이어서 한 수량만 적으세요.`:''}</div></div>
-      <input id="qq" inputmode="numeric" placeholder="수량" autocomplete="off">
+      <div class="shh"><b>${title}</b></div><div class="qlist">${body}</div>
       <button style="width:100%;margin-bottom:8px" data-act="qok">저장하고 계속</button>
-      <div class="row"><button class="ghost" data-act="qskip">수량 없이 계속</button><button class="ghost" data-act="qcancel">취소</button></div></div>`;
-    setTimeout(()=>{const q=$('#qq');if(q)q.focus()},50);
+      <div class="row"><button class="ghost" data-act="qskip">${skipLabel}</button><button class="ghost" data-act="qcancel">취소</button></div></div>`;
+    setTimeout(()=>{const q=$('#sheet input, #sheet textarea');if(q)q.focus()},50);
   });
 }
-// 품목 작업을 끝내고 다른 작업으로 가거나 퇴근할 때만 수량을 묻는다. soft=true(휴게·이어하기)면 묻지 않음
-async function confirmQty(soft){
+// 작업을 끝내고 다른 작업으로 가거나 퇴근할 때만 묻는다. soft=true(휴게·이어하기)면 묻지 않고 입력해 둔 값만 저장
+async function confirmJob(soft){
   const open=S.records.find(r=>!r.out),pend=pendingSeg(open);
   if(!pend)return true;
-  const el=$('#qty'),v=(el&&pend===curSeg(open))?el.value.trim():'';
-  if(v!==''){if(String(pend.qty??'')!==v)await api('POST','/api/task/qty',{qty:v});return true}   // 입력만 하고 저장 안 눌렀으면 자동 저장
-  if(soft||pend.qty!=null)return true;
-  const prior=open.segments.filter(s=>s!==pend&&s.item&&s.item.id===pend.item.id&&s.task===pend.task).reduce((a,s)=>a+(s.qty||0),0);
-  const r=await askQty(pend,prior);
+  const onScreen=pend===curSeg(open);
+  // 휴게를 사이에 두고 이어진 앞 구간들만 (따로 시작한 같은 작업은 별개)
+  const earlier=[];
+  for(let i=open.segments.indexOf(pend);i>=2&&open.segments[i].cont;i-=2)earlier.push(open.segments[i-2]);
+  if(pend.memo!==undefined){
+    let memo=pend.memo;
+    if(onScreen&&$('#memo')){const v=$('#memo').value.trim();if(v!==memo){await api('POST','/api/task/memo',{memo:v});memo=v}}   // 저장 안 눌렀으면 자동 저장
+    if(soft||memo||earlier.some(s=>s.memo))return true;
+    const r=await askSheet('특이사항',`<div class="sub" style="margin-bottom:8px">${esc(pend.name)} 작업을 마칩니다. 특이사항이 있으면 적어 주세요.</div><textarea id="qmemo" rows="4" maxlength="500" placeholder="특이사항"></textarea>`,'특이사항 없음');
+    if(!r)return false;
+    if(!r.skip)await api('POST','/api/task/memo',{memo:r.memo});
+    return true;
+  }
+  const items=itemsOf(pend).map(i=>({...i}));
+  if(onScreen){
+    const typed=readQtys('#app .qi');
+    if(items.some(i=>typed[i.id]!==undefined&&String(i.qty??'')!==typed[i.id])){   // 저장 안 눌렀으면 자동 저장
+      await saveQtys(pend,typed);
+    }
+    items.forEach(i=>{if(typed[i.id]!==undefined)i.qty=typed[i.id]});
+  }
+  if(soft||items.every(i=>i.qty!=null))return true;
+  const priorOf=id=>earlier.reduce((a,s)=>a+itemsOf(s).filter(x=>x.id===id).reduce((b,x)=>b+(x.qty||0),0),0);
+  const r=await askSheet('수량 입력',`<div class="sub" style="margin-bottom:8px">${esc(pend.name)} 작업을 마칩니다. 몇 개 하셨나요?</div>`
+    +items.map(i=>{const p=priorOf(i.id);return `<div class="qrow"><b>${esc(i.name)}${p?`<div class="sub">앞서 입력한 ${p}개는 합쳐집니다. 이어서 한 수량만 적으세요.</div>`:''}</b><input class="qi" data-id="${i.id}" inputmode="numeric" placeholder="수량" value="${i.qty??''}" autocomplete="off"></div>`}).join(''),'수량 없이 계속');
   if(!r)return false;
-  if(r.skip)return true;
-  await api('POST','/api/task/qty',{qty:r.qty});return true;
+  if(!r.skip)await saveQtys(pend,r.qtys);
+  return true;
 }
 async function startTask(body,soft){
-  try{if(!(await confirmQty(soft)))return;await api('POST','/api/task',body);closeSheet();await refresh()}
+  try{if(!(await confirmJob(soft)))return;await api('POST','/api/task',body);closeSheet();await refresh()}
   catch(er){alert(er.message);refresh().catch(()=>{})}
 }
 function logout(){token=null;S=null;ITEMS=null;closeSheet();try{localStorage.removeItem(TKEY)}catch(e){}ui.msg='';ui.err=false;render()}
@@ -376,7 +431,7 @@ async function login(body){
 async function punch(kind){
   ui.busy=true;const btn=$('#pb');btn.disabled=true;setMsg('위치 확인 중…');
   try{
-    if(kind==='out'&&!(await confirmQty())){ui.busy=false;btn.disabled=false;setMsg('');return}
+    if(kind==='out'&&!(await confirmJob())){ui.busy=false;btn.disabled=false;setMsg('');return}
     const body={kind};
     if(S.settings.hasLoc){const p=await getPos();body.lat=p.latitude;body.lng=p.longitude;body.acc=p.accuracy}
     const r=await api('POST','/api/punch',body);
@@ -389,9 +444,10 @@ function downloadCSV(){
   const recs=S.records.filter(r=>r.date.startsWith(ui.month)&&r.out&&wm[r.wid]).sort((a,b)=>a.in-b.in);
   const names=taskTotals(recs).map(x=>x[0]);   // 작업별 열: 이번 달 많이 쓴 작업 순
   const segMin=(r,n)=>(r.segments||[]).filter(s=>s.name===n).reduce((a,s)=>a+Math.round(((s.end||r.out)-s.start)/60000),0);
-  const lines=[['이름','날짜','출근','퇴근','총분','휴게분','기본분','연장분','시급','급여',...names.map(n=>n+'(분)')]];
+  const memos=r=>(r.segments||[]).filter(s=>s.memo).map(s=>`[${s.name}] ${s.memo}`).join(' / ');
+  const lines=[['이름','날짜','출근','퇴근','총분','휴게분','기본분','연장분','시급','급여',...names.map(n=>n+'(분)'),'특이사항']];
   recs.forEach(r=>{
-    const w=wm[r.wid],c=calc(r,w.wage);lines.push([w.name,r.date,hm(r.in),hm(r.out),c.total,c.brk,c.reg,c.ot,w.wage,Math.round(c.pay),...names.map(n=>segMin(r,n)||'')])});
+    const w=wm[r.wid],c=calc(r,w.wage);lines.push([w.name,r.date,hm(r.in),hm(r.out),c.total,c.brk,c.reg,c.ot,w.wage,Math.round(c.pay),...names.map(n=>segMin(r,n)||''),memos(r)])});
   const csv='﻿'+lines.map(l=>l.map(v=>{v=String(v);if(/^[=+\-@]/.test(v))v="'"+v;return `"${v.replace(/"/g,'""')}"`}).join(',')).join('\r\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download=`봄펀치_${ui.month}.csv`;a.click();
@@ -404,7 +460,8 @@ function downloadItemCSV(){
   const wm=Object.fromEntries(S.workers.map(w=>[w.id,w]));
   const lines=[['이름','날짜','작업','품목','수량','분']];
   S.records.filter(r=>r.date.startsWith(ui.month)&&wm[r.wid]).sort((a,b)=>a.in-b.in).forEach(r=>(r.segments||[]).forEach(s=>{
-    if(s.item)lines.push([wm[r.wid].name,r.date,s.name,s.item.name,s.qty??'',Math.round(((s.end||r.out||Date.now())-s.start)/60000)]);
+    const list=itemsOf(s);
+    list.forEach(i=>lines.push([wm[r.wid].name,r.date,s.name,i.name,i.qty??'',Math.round(((s.end||r.out||Date.now())-s.start)/60000/list.length)]));
   }));
   saveCSV(lines,`봄펀치_품목별_${ui.month}.csv`);
 }
@@ -424,29 +481,50 @@ document.addEventListener('click',async e=>{
   else if(act==='task'){
     e.preventDefault();
     const t=S.tasks.find(x=>x.id===id);
-    if(t&&t.kind==='item')openItemSheet(t);
+    if(t&&(t.kind==='item'||t.kind==='multi'))openItemSheet(t);
     else if(t&&t.kind==='sub')openSubSheet(t);
     else startTask({taskId:id},id==='break');   // 휴게는 수량을 묻지 않음
   }
   else if(act==='resume')startTask({taskId:'resume'},true);
   else if(act==='qok'){
-    const v=$('#qq').value.trim();
-    if(!/^\d+$/.test(v))return alert('수량을 숫자로 입력해 주세요.');
-    closeSheet();askQty._res({qty:v});
+    let result;
+    if($('#qmemo')){
+      const memo=$('#qmemo').value.trim();if(!memo)return alert('특이사항을 적거나 "특이사항 없음"을 눌러 주세요.');
+      result={memo};
+    }else{
+      const qtys=readQtys('#sheet .qi'),vals=Object.values(qtys);
+      if(!vals.length||vals.some(v=>!/^\d+$/.test(v)))return alert('수량을 숫자로 입력해 주세요.');
+      result={qtys};
+    }
+    closeSheet();askSheet._res(result);
   }
-  else if(act==='qskip'){closeSheet();askQty._res({skip:true})}
-  else if(act==='qcancel'){closeSheet();askQty._res(null)}
+  else if(act==='qskip'){closeSheet();askSheet._res({skip:true})}
+  else if(act==='qcancel'){closeSheet();askSheet._res(null)}
   else if(act==='closesheet')closeSheet();
   else if(act==='install'&&deferredInstall){deferredInstall.prompt();await deferredInstall.userChoice.catch(()=>{});deferredInstall=null;render()}
   else if(act==='gtab'){ui.guideTab=id;render()}
   else if(act==='instoff'){try{localStorage.setItem('bp_install_off','1')}catch(er){}render()}
   else if(act==='selitem'){
-    document.querySelectorAll('.it.on').forEach(x=>x.classList.remove('on'));b.classList.add('on');
-    const st=$('#istart');st.dataset.item=id;st.disabled=false;$('#isel').textContent='선택: '+b.querySelector('b').textContent;
+    const st=$('#istart');
+    if(st.dataset.multi){
+      if(!b.classList.contains('on')&&document.querySelectorAll('.it.on').length>=20)return alert('품목은 20개까지 선택할 수 있습니다.');
+      b.classList.toggle('on');
+    }else{document.querySelectorAll('.it.on').forEach(x=>x.classList.remove('on'));b.classList.add('on')}
+    const sel=[...document.querySelectorAll('.it.on')];
+    st.disabled=!sel.length;
+    $('#isel').textContent=sel.length?`선택 ${sel.length}개: ${sel.map(x=>x.querySelector('b').textContent).join(', ')}`:'품목을 눌러 선택하세요';
   }
-  else if(act==='startitem')startTask({taskId:id,itemId:b.dataset.item});
+  else if(act==='startitem'){
+    const ids=[...document.querySelectorAll('.it.on')].map(x=>x.dataset.id);
+    startTask(b.dataset.multi?{taskId:id,itemIds:ids}:{taskId:id,itemId:ids[0]});
+  }
   else if(act==='startsub')startTask({taskId:id,sub:b.dataset.sub});
-  else if(act==='saveqty')run(()=>api('POST','/api/task/qty',{qty:$('#qty').value}),'수량을 저장했습니다.');
+  else if(act==='saveqty'){
+    const map=readQtys('#app .qi');
+    if(!Object.keys(map).length)return alert('수량을 입력해 주세요.');
+    const seg=curSeg(S.records.find(r=>!r.out));run(()=>saveQtys(seg,map),'수량을 저장했습니다.');
+  }
+  else if(act==='savememo'){const memo=$('#memo').value;run(()=>api('POST','/api/task/memo',{memo}),'특이사항을 저장했습니다.')}
   else if(act==='addtask'){const body={name:$('#tn').value,kind:$('#tk').value,subs:$('#ts').value};run(()=>api('POST','/api/admin/tasks',body))}
   else if(act==='saveitems'){
     if(S.itemCount>0&&!confirm(`지금 등록된 ${S.itemCount}개 품목이 모두 새 목록으로 교체됩니다. 계속할까요?`))return;
